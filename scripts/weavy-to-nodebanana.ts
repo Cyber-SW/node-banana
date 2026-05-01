@@ -884,7 +884,61 @@ export function convertWeavyToNB(
     ...(Object.keys(groups).length > 0 ? { groups } : {}),
     _conversion_report: report,
   };
+
+  // Step 6: normalize layout density. Weavy spreads nodes over ~12x
+  // more canvas area per node than native NB workflows, so an imported
+  // file feels zoomed-out and the nodes look small relative to other
+  // NB content. Translate to origin and scale positions + group sizes
+  // by a constant factor to match native NB layout density. Node
+  // dimensions themselves are NOT scaled — we want individual cards to
+  // render at the same size as native nodes.
+  rescaleLayout(out, 0.3);
+
   return out;
+}
+
+/**
+ * Translate the workflow so its top-left node sits near the origin,
+ * then multiply all positions and group sizes by `scale`. Node card
+ * dimensions are untouched.
+ */
+function rescaleLayout(wf: NBWorkflowFile, scale: number): void {
+  if (wf.nodes.length === 0) return;
+
+  // Bounding box across nodes and groups.
+  let minX = Infinity;
+  let minY = Infinity;
+  for (const n of wf.nodes) {
+    if (n.position.x < minX) minX = n.position.x;
+    if (n.position.y < minY) minY = n.position.y;
+  }
+  if (wf.groups) {
+    for (const g of Object.values(wf.groups)) {
+      if (g.position.x < minX) minX = g.position.x;
+      if (g.position.y < minY) minY = g.position.y;
+    }
+  }
+  if (!isFinite(minX)) minX = 0;
+  if (!isFinite(minY)) minY = 0;
+
+  for (const n of wf.nodes) {
+    n.position = {
+      x: Math.round((n.position.x - minX) * scale),
+      y: Math.round((n.position.y - minY) * scale),
+    };
+  }
+  if (wf.groups) {
+    for (const g of Object.values(wf.groups)) {
+      g.position = {
+        x: Math.round((g.position.x - minX) * scale),
+        y: Math.round((g.position.y - minY) * scale),
+      };
+      g.size = {
+        width: Math.round(g.size.width * scale),
+        height: Math.round(g.size.height * scale),
+      };
+    }
+  }
 }
 
 // ─── CLI ───────────────────────────────────────────────────────────────
