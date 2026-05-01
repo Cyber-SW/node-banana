@@ -4,7 +4,7 @@ import { useState, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useWorkflowStore, WorkflowFile } from "@/store/workflowStore";
 
-type ImportTab = "screenshot" | "notion";
+type ImportTab = "screenshot" | "notion" | "weavy";
 
 interface ImportWorkflowDialogProps {
     isOpen: boolean;
@@ -15,10 +15,13 @@ export function ImportWorkflowDialog({ isOpen, onClose }: ImportWorkflowDialogPr
     const [activeTab, setActiveTab] = useState<ImportTab>("screenshot");
     const [image, setImage] = useState<string | null>(null);
     const [notionUrl, setNotionUrl] = useState("");
+    const [weavyJson, setWeavyJson] = useState<string>("");
+    const [weavyFilename, setWeavyFilename] = useState<string>("");
     const [isImporting, setIsImporting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [progress, setProgress] = useState<string>("");
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const weavyFileInputRef = useRef<HTMLInputElement>(null);
     const loadWorkflow = useWorkflowStore((state) => state.loadWorkflow);
 
     const getGeminiKey = (): string | undefined => {
@@ -145,10 +148,72 @@ export function ImportWorkflowDialog({ isOpen, onClose }: ImportWorkflowDialogPr
         }
     }, [notionUrl, loadWorkflow, onClose]);
 
+    // ---- Weavy JSON handlers ----
+    const handleWeavyFile = useCallback((file: File) => {
+        if (!file.name.endsWith(".json") && file.type !== "application/json") {
+            setError("Please upload a .json file exported from Weavy.");
+            return;
+        }
+        if (file.size > 25 * 1024 * 1024) {
+            setError("File too large. Max 25MB.");
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const text = e.target?.result as string;
+            setWeavyJson(text);
+            setWeavyFilename(file.name);
+            setError(null);
+        };
+        reader.readAsText(file);
+    }, []);
+
+    const handleWeavyDrop = useCallback(
+        (e: React.DragEvent) => {
+            e.preventDefault();
+            const file = e.dataTransfer.files[0];
+            if (file) handleWeavyFile(file);
+        },
+        [handleWeavyFile]
+    );
+
+    const handleImportWeavy = useCallback(async () => {
+        if (!weavyJson.trim()) return;
+        setIsImporting(true);
+        setError(null);
+        setProgress("Converting Weavy workflow...");
+
+        try {
+            const response = await fetch("/api/import-weavy", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ weavy: weavyJson, filename: weavyFilename || "weavy.json" }),
+            });
+            const result = await response.json();
+            if (!result.success) {
+                setError(result.error || "Import failed");
+                return;
+            }
+            const r = result.report;
+            const ratio = r ? Math.round((r.convertedNodes / Math.max(1, r.totalWeavyNodes)) * 100) : 100;
+            setProgress(`Converted ${result.workflow.nodes.length} nodes (${ratio}%). Loading...`);
+            await new Promise((r) => setTimeout(r, 400));
+            await loadWorkflow(result.workflow as WorkflowFile);
+            onClose();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Import failed");
+        } finally {
+            setIsImporting(false);
+            setProgress("");
+        }
+    }, [weavyJson, weavyFilename, loadWorkflow, onClose]);
+
     const handleClose = useCallback(() => {
         if (isImporting) return;
         setImage(null);
         setNotionUrl("");
+        setWeavyJson("");
+        setWeavyFilename("");
         setError(null);
         setProgress("");
         onClose();
@@ -196,7 +261,9 @@ export function ImportWorkflowDialog({ isOpen, onClose }: ImportWorkflowDialogPr
                         <div>
                             <h2 className="text-sm font-semibold text-white">Import Workflow</h2>
                             <p className="text-[11px] text-[#666]">
-                                {activeTab === "screenshot" ? "From workflow screenshot" : "From Notion SOP page"}
+                                {activeTab === "screenshot" ? "From workflow screenshot"
+                                    : activeTab === "notion" ? "From Notion SOP page"
+                                    : "From Weavy.ai JSON export"}
                             </p>
                         </div>
                     </div>
@@ -230,6 +297,15 @@ export function ImportWorkflowDialog({ isOpen, onClose }: ImportWorkflowDialogPr
                             }`}
                     >
                         📋 Notion SOP
+                    </button>
+                    <button
+                        onClick={() => { if (!isImporting) { setActiveTab("weavy"); setError(null); } }}
+                        className={`px-4 py-1.5 rounded-lg text-xs font-medium transition-all duration-200 ${activeTab === "weavy"
+                                ? "bg-white/[0.08] text-white"
+                                : "text-[#666] hover:text-[#999] hover:bg-white/[0.03]"
+                            }`}
+                    >
+                        🧬 Weavy JSON
                     </button>
                 </div>
 
@@ -353,6 +429,74 @@ export function ImportWorkflowDialog({ isOpen, onClose }: ImportWorkflowDialogPr
                         </>
                     )}
 
+                    {/* ===== Weavy JSON tab ===== */}
+                    {activeTab === "weavy" && (
+                        <>
+                            {weavyJson ? (
+                                <div className="rounded-xl border border-white/[0.08] bg-black/40 p-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <svg className="w-4 h-4 text-orange-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                            </svg>
+                                            <span className="text-sm text-white truncate">{weavyFilename || "pasted JSON"}</span>
+                                            <span className="text-[11px] text-[#555] shrink-0">{Math.round(weavyJson.length / 1024)} KB</span>
+                                        </div>
+                                        {!isImporting && (
+                                            <button
+                                                onClick={() => { setWeavyJson(""); setWeavyFilename(""); setError(null); }}
+                                                className="text-[#999] hover:text-white text-xs ml-3"
+                                            >Clear</button>
+                                        )}
+                                    </div>
+                                    {isImporting && (
+                                        <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-orange-500/[0.04] border border-orange-500/[0.08]">
+                                            <div className="w-4 h-4 rounded-full border-2 border-white/10 border-t-orange-500 animate-spin shrink-0" />
+                                            <span className="text-xs text-orange-300">{progress}</span>
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
+                                <label
+                                    className="flex flex-col items-center justify-center w-full h-[200px] rounded-xl border-2 border-dashed border-white/[0.08] hover:border-orange-500/30 hover:bg-orange-500/[0.02] cursor-pointer transition-all duration-300 group"
+                                    onDrop={handleWeavyDrop}
+                                    onDragOver={(e) => e.preventDefault()}
+                                >
+                                    <div
+                                        className="w-12 h-12 rounded-2xl flex items-center justify-center mb-3 group-hover:scale-110 transition-transform duration-300"
+                                        style={{ background: "rgba(249,115,22,0.06)", border: "1px solid rgba(249,115,22,0.12)" }}
+                                    >
+                                        <svg className="w-6 h-6 text-[#555] group-hover:text-orange-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                        </svg>
+                                    </div>
+                                    <span className="text-sm text-[#666] group-hover:text-[#999] transition-colors mb-1">
+                                        Drop a Weavy export .json or click to upload
+                                    </span>
+                                    <span className="text-[11px] text-[#444]">
+                                        Workspace exports work too — anything with nodes + edges.
+                                    </span>
+                                    <input
+                                        ref={weavyFileInputRef}
+                                        type="file"
+                                        accept=".json,application/json"
+                                        className="hidden"
+                                        onChange={(e) => {
+                                            const file = e.target.files?.[0];
+                                            if (file) handleWeavyFile(file);
+                                        }}
+                                    />
+                                </label>
+                            )}
+                            <div className="mt-3 px-3 py-2 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                                <p className="text-[10px] text-[#555]">
+                                    ⓘ Conversion runs locally — no AI calls, no upload. Unmappable nodes
+                                    (compv3, levels, etc.) become sticky-note placeholders so you can rebuild them.
+                                </p>
+                            </div>
+                        </>
+                    )}
+
                     {/* Error */}
                     {error && (
                         <div className="mt-3 px-4 py-2.5 rounded-xl bg-red-500/[0.06] border border-red-500/[0.12]">
@@ -366,23 +510,39 @@ export function ImportWorkflowDialog({ isOpen, onClose }: ImportWorkflowDialogPr
                     <p className="text-[11px] text-[#444] max-w-[300px]">
                         {activeTab === "screenshot"
                             ? "AI will analyze the screenshot and recreate the workflow."
-                            : "AI will read the SOP and build a workflow from its steps."}
+                            : activeTab === "notion"
+                                ? "AI will read the SOP and build a workflow from its steps."
+                                : "Direct conversion of a Weavy export — no AI."}
                     </p>
-                    <button
-                        onClick={activeTab === "screenshot" ? handleImportScreenshot : handleImportNotion}
-                        disabled={activeTab === "screenshot" ? (!image || isImporting) : (!notionUrl.trim() || isImporting)}
-                        className="px-5 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 hover:brightness-110"
-                        style={{
-                            background: (activeTab === "screenshot" ? !image : !notionUrl.trim()) || isImporting
-                                ? "rgba(255,255,255,0.06)"
-                                : "linear-gradient(135deg, #f97316, #ef4444)",
-                            boxShadow: (activeTab === "screenshot" ? !image : !notionUrl.trim()) || isImporting
-                                ? "none"
-                                : "0 2px 12px rgba(249,115,22,0.3)",
-                        }}
-                    >
-                        {isImporting ? "Importing..." : "Import Workflow"}
-                    </button>
+                    {(() => {
+                        const onClick = activeTab === "screenshot"
+                            ? handleImportScreenshot
+                            : activeTab === "notion"
+                                ? handleImportNotion
+                                : handleImportWeavy;
+                        const empty = activeTab === "screenshot"
+                            ? !image
+                            : activeTab === "notion"
+                                ? !notionUrl.trim()
+                                : !weavyJson.trim();
+                        return (
+                            <button
+                                onClick={onClick}
+                                disabled={empty || isImporting}
+                                className="px-5 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all duration-200 hover:brightness-110"
+                                style={{
+                                    background: empty || isImporting
+                                        ? "rgba(255,255,255,0.06)"
+                                        : "linear-gradient(135deg, #f97316, #ef4444)",
+                                    boxShadow: empty || isImporting
+                                        ? "none"
+                                        : "0 2px 12px rgba(249,115,22,0.3)",
+                                }}
+                            >
+                                {isImporting ? "Importing..." : "Import Workflow"}
+                            </button>
+                        );
+                    })()}
                 </div>
             </div>
         </div>,

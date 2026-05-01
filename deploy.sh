@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-SERVER="root@46.225.116.32"
-APP_DIR="/opt/node-banana"
+SERVER="root@46.224.96.47"
+APP_DIR="/opt/migrated/node-banana"
 REPO="https://github.com/Cyber-SW/node-banana.git"
 BRANCH="develop"
 
@@ -12,7 +12,7 @@ git push origin "$BRANCH"
 echo "==> Deploying to $SERVER..."
 ssh "$SERVER" bash -s <<'REMOTE'
 set -e
-APP_DIR="/opt/node-banana"
+APP_DIR="/opt/migrated/node-banana"
 REPO="https://github.com/Cyber-SW/node-banana.git"
 BRANCH="develop"
 
