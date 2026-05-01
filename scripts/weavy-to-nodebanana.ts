@@ -322,10 +322,16 @@ function getNodeSize(node: WeavyNode): { width: number; height: number } | null 
 /**
  * Build NB node data for a converted node. Returns null if conversion
  * is not possible — caller will emit a stickyNote placeholder.
+ *
+ * `incomingEdgeCount` is the number of edges from `bypassRouters` that
+ * target this node. Some Weavy types (notably `array`) behave
+ * differently when used as aggregators vs. static sources, so the
+ * mapping depends on whether anything connects in.
  */
 function convertWeavyNode(
   node: WeavyNode,
-  report: ConversionReport
+  report: ConversionReport,
+  incomingEdgeCount: number
 ): { nbType: string; data: Record<string, unknown> } | null {
   switch (node.type) {
     case "stickynote": {
@@ -358,7 +364,7 @@ function convertWeavyNode(
         data: {
           separator: params?.separator ?? "\n",
           outputText: null,
-          textInputHandles: 2,
+          textInputHandles: Math.max(2, incomingEdgeCount),
         },
       };
     }
@@ -403,9 +409,25 @@ function convertWeavyNode(
     }
 
     case "array": {
+      // Weavy `array` is dual-purpose:
+      //   - Aggregator: incoming text edges populate the array slots →
+      //     map to NB promptConcatenator (newline-joined) so downstream
+      //     listSelector can split it back into items.
+      //   - Static source: holds inline string options with no incoming
+      //     edges → map to NB arrayNode.
       const params = node.data.params as { options?: unknown[]; stringArray?: string[] } | null | undefined;
       const items = (params?.stringArray ?? params?.options ?? [])
         .map((v) => (typeof v === "string" ? v : JSON.stringify(v)));
+      if (incomingEdgeCount > 0) {
+        return {
+          nbType: "promptConcatenator",
+          data: {
+            separator: "\n",
+            outputText: null,
+            textInputHandles: Math.max(2, incomingEdgeCount),
+          },
+        };
+      }
       return {
         nbType: "arrayNode",
         data: {
@@ -694,13 +716,21 @@ export function convertWeavyToNB(
   // Step 1: bypass routers
   const edgesAfterBypass = bypassRouters(weavy.nodes, weavy.edges, report);
 
+  // Precompute incoming-edge count per node (post-bypass) so node
+  // converters can decide aggregator-vs-static behavior (e.g. `array`).
+  const incomingByNode = new Map<string, number>();
+  for (const e of edgesAfterBypass) {
+    incomingByNode.set(e.target, (incomingByNode.get(e.target) ?? 0) + 1);
+  }
+
   // Step 2: convert each node (except routers and groups, handled separately)
   const nbNodesById = new Map<string, NBNode>();
   for (const wnode of weavy.nodes) {
     if (wnode.type === "router") continue; // dropped by bypass
     if (wnode.type === "custom_group") continue; // handled by inferGroups; we don't emit a node
 
-    const converted = convertWeavyNode(wnode, report);
+    const inCount = incomingByNode.get(wnode.id) ?? 0;
+    const converted = convertWeavyNode(wnode, report, inCount);
     if (converted) {
       const size =
         getNodeSize(wnode) ??
@@ -727,7 +757,40 @@ export function convertWeavyToNB(
   // Step 3: groups (assigns groupId on nbNodes by bbox)
   const groups = inferGroups(weavy.nodes, nbNodesById, report);
 
-  // Step 4: remap edges
+  // Step 4: remap edges. NB convention for multi-input handles: the
+  // first slot is `text` / `image`, subsequent slots are `text-1`,
+  // `text-2`, `image-1`, etc. So we count uses per (target, base) and
+  // assign indices in encounter order.
+  //
+  // `text-multi` target types: promptConcatenator, promptConstructor.
+  // `image-multi` target types: nanoBanana, llmGenerate, generateVideo,
+  //   generate3d, soraBlueprint, brollBatch, imageIterator, imageFilter.
+  const TEXT_MULTI = new Set(["promptConcatenator", "promptConstructor"]);
+  const IMAGE_MULTI = new Set([
+    "nanoBanana",
+    "llmGenerate",
+    "generateVideo",
+    "generate3d",
+    "soraBlueprint",
+    "brollBatch",
+    "imageIterator",
+    "imageFilter",
+    "zipIterator",
+  ]);
+
+  const slotCount = new Map<string, number>();
+  const slotKey = (target: string, base: string) => `${target}|${base}`;
+  function indexedHandle(target: string, baseHandle: string, targetType: string): string {
+    const isMulti =
+      (baseHandle === "text" && TEXT_MULTI.has(targetType)) ||
+      (baseHandle === "image" && IMAGE_MULTI.has(targetType));
+    if (!isMulti) return baseHandle;
+    const k = slotKey(target, baseHandle);
+    const idx = slotCount.get(k) ?? 0;
+    slotCount.set(k, idx + 1);
+    return idx === 0 ? baseHandle : `${baseHandle}-${idx}`;
+  }
+
   const nbEdges: NBEdge[] = [];
   for (const e of edgesAfterBypass) {
     const sourceNode = nbNodesById.get(e.source);
@@ -739,7 +802,8 @@ export function convertWeavyToNB(
     const sourceParam = extractHandleParam(e.sourceHandle, e.source);
     const targetParam = extractHandleParam(e.targetHandle, e.target);
     const sourceHandle = resolveNBHandle(sourceParam);
-    const targetHandle = resolveNBHandle(targetParam);
+    const targetBase = resolveNBHandle(targetParam);
+    const targetHandle = indexedHandle(e.target, targetBase, targetNode.type);
     nbEdges.push({
       id: `edge-${e.source}-${e.target}-${sourceHandle}-${targetHandle}-${nbEdges.length}`,
       source: e.source,
@@ -752,6 +816,27 @@ export function convertWeavyToNB(
     });
   }
   report.edgesOut = nbEdges.length;
+
+  // Step 5: bump dynamic input-handle counts on target nodes to match
+  // the highest slot we assigned. NB renders one handle per slot, so a
+  // node receiving 4 text edges needs textInputHandles >= 4.
+  for (const [k, count] of slotCount) {
+    const [targetId, base] = k.split("|");
+    const node = nbNodesById.get(targetId);
+    if (!node) continue;
+    if (base === "text" && TEXT_MULTI.has(node.type)) {
+      const data = node.data as { textInputHandles?: number; inputCount?: number };
+      if ("textInputHandles" in data) {
+        data.textInputHandles = Math.max(data.textInputHandles ?? 2, count);
+      }
+      if ("inputCount" in data) {
+        data.inputCount = Math.max(data.inputCount ?? 2, count);
+      }
+    } else if (base === "image" && IMAGE_MULTI.has(node.type)) {
+      const data = node.data as { imageInputHandles?: number };
+      data.imageInputHandles = Math.max(data.imageInputHandles ?? 1, count);
+    }
+  }
 
   const out: NBWorkflowFile = {
     version: 1,
