@@ -27,6 +27,9 @@ interface WeavyNode {
   id: string;
   type: string;
   position: WeavyPosition;
+  /** React Flow parent reference. Child positions are RELATIVE to this parent. */
+  parentId?: string | null;
+  parentNode?: string | null;
   data: Record<string, unknown> & {
     name?: string;
     model?: { name?: string; service?: string } | string | null;
@@ -594,8 +597,34 @@ function pointInBox(
   );
 }
 
-function inferGroups(
+/**
+ * Resolve absolute position for a Weavy node by walking up its
+ * parentId chain. Weavy stores child node positions relative to their
+ * parent group, but NB groups don't reparent — children carry absolute
+ * coordinates. So we sum offsets up the parent chain.
+ */
+function resolveAbsolutePosition(
+  node: WeavyNode,
+  byId: Map<string, WeavyNode>
+): WeavyPosition {
+  let x = node.position.x;
+  let y = node.position.y;
+  let parentId = node.parentId ?? node.parentNode ?? null;
+  const seen = new Set<string>([node.id]);
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    x += parent.position.x;
+    y += parent.position.y;
+    parentId = parent.parentId ?? parent.parentNode ?? null;
+  }
+  return { x, y };
+}
+
+function buildGroups(
   weavyNodes: WeavyNode[],
+  weavyById: Map<string, WeavyNode>,
   nbNodesById: Map<string, NBNode>,
   report: ConversionReport
 ): Record<string, NBGroup> {
@@ -603,15 +632,7 @@ function inferGroups(
   const groupNodes = weavyNodes.filter((n) => n.type === "custom_group");
   if (groupNodes.length === 0) return groups;
 
-  // Sort largest area first so smaller groups (nested) take precedence
-  groupNodes.sort((a, b) => {
-    const aSize = getNodeSize(a);
-    const bSize = getNodeSize(b);
-    const aArea = (aSize?.width ?? 0) * (aSize?.height ?? 0);
-    const bArea = (bSize?.width ?? 0) * (bSize?.height ?? 0);
-    return bArea - aArea;
-  });
-
+  // Authoritative: assign group membership from parentId, not bbox.
   for (const g of groupNodes) {
     const size = getNodeSize(g);
     if (!size) {
@@ -619,24 +640,33 @@ function inferGroups(
       continue;
     }
     const groupId = g.id;
+    const absPos = resolveAbsolutePosition(g, weavyById);
     groups[groupId] = {
       id: groupId,
       name: (g.data.name as string) || "Group",
       color: nextGroupColor(),
-      position: g.position,
+      position: absPos,
       size,
     };
+  }
 
-    // Assign children by bbox containment (last assignment wins, which
-    // is the smallest containing group due to sort order)
-    const box = { ...g.position, ...size };
-    for (const [, child] of nbNodesById) {
-      if (child.id === groupId) continue;
-      if (pointInBox(child.position, box)) {
-        child.groupId = groupId;
+  // Stamp groupId on every child whose Weavy parentId is a group we
+  // emitted. Walk up the parent chain so deeply-nested children still
+  // get attributed to the nearest enclosing emitted group.
+  for (const wnode of weavyNodes) {
+    if (wnode.type === "custom_group") continue;
+    let pid = wnode.parentId ?? wnode.parentNode ?? null;
+    while (pid) {
+      if (groups[pid]) {
+        const nb = nbNodesById.get(wnode.id);
+        if (nb) nb.groupId = pid;
+        break;
       }
+      const parent = weavyById.get(pid);
+      pid = parent ? parent.parentId ?? parent.parentNode ?? null : null;
     }
   }
+
   report.groupsCreated = Object.keys(groups).length;
   return groups;
 }
@@ -723,14 +753,19 @@ export function convertWeavyToNB(
     incomingByNode.set(e.target, (incomingByNode.get(e.target) ?? 0) + 1);
   }
 
+  // Index every Weavy node by id so we can resolve parent chains.
+  const weavyById = new Map<string, WeavyNode>();
+  for (const n of weavy.nodes) weavyById.set(n.id, n);
+
   // Step 2: convert each node (except routers and groups, handled separately)
   const nbNodesById = new Map<string, NBNode>();
   for (const wnode of weavy.nodes) {
     if (wnode.type === "router") continue; // dropped by bypass
-    if (wnode.type === "custom_group") continue; // handled by inferGroups; we don't emit a node
+    if (wnode.type === "custom_group") continue; // emitted as NB group, not node
 
     const inCount = incomingByNode.get(wnode.id) ?? 0;
     const converted = convertWeavyNode(wnode, report, inCount);
+    const absPos = resolveAbsolutePosition(wnode, weavyById);
     if (converted) {
       const size =
         getNodeSize(wnode) ??
@@ -739,7 +774,7 @@ export function convertWeavyToNB(
       const nb: NBNode = {
         id: wnode.id,
         type: converted.nbType,
-        position: wnode.position,
+        position: absPos,
         data: converted.data,
         style: size,
         measured: size,
@@ -749,13 +784,14 @@ export function convertWeavyToNB(
     } else {
       report.unmappedTypes[wnode.type] = (report.unmappedTypes[wnode.type] ?? 0) + 1;
       const ph = makePlaceholder(wnode, `Type "${wnode.type}" has no NB equivalent yet.`);
+      ph.position = absPos;
       nbNodesById.set(wnode.id, ph);
       report.placeholderNodes++;
     }
   }
 
-  // Step 3: groups (assigns groupId on nbNodes by bbox)
-  const groups = inferGroups(weavy.nodes, nbNodesById, report);
+  // Step 3: groups (assigns groupId on nbNodes via Weavy parentId)
+  const groups = buildGroups(weavy.nodes, weavyById, nbNodesById, report);
 
   // Step 4: remap edges. NB convention for multi-input handles: the
   // first slot is `text` / `image`, subsequent slots are `text-1`,
