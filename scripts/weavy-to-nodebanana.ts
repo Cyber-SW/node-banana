@@ -251,6 +251,41 @@ const MODEL_MAP: Record<string, ModelMapping> = {
 
 // ─── Helpers ───────────────────────────────────────────────────────────
 
+/**
+ * Mirrors src/store/utils/nodeDefaults.ts `defaultNodeDimensions`. Kept
+ * inline so the script has no compile-time dependency on the app code.
+ */
+const NB_DEFAULT_DIMENSIONS: Record<string, { width: number; height: number }> = {
+  imageInput: { width: 300, height: 280 },
+  audioInput: { width: 300, height: 200 },
+  annotation: { width: 300, height: 280 },
+  prompt: { width: 320, height: 220 },
+  promptConstructor: { width: 300, height: 220 },
+  promptConcatenator: { width: 320, height: 240 },
+  nanoBanana: { width: 300, height: 300 },
+  generateVideo: { width: 300, height: 300 },
+  generate3d: { width: 300, height: 300 },
+  llmGenerate: { width: 320, height: 360 },
+  splitGrid: { width: 300, height: 320 },
+  output: { width: 320, height: 320 },
+  outputGallery: { width: 320, height: 360 },
+  imageCompare: { width: 400, height: 360 },
+  videoStitch: { width: 400, height: 280 },
+  easeCurve: { width: 340, height: 480 },
+  glbViewer: { width: 360, height: 380 },
+  imageIterator: { width: 340, height: 300 },
+  textIterator: { width: 340, height: 280 },
+  webScraper: { width: 340, height: 320 },
+  stickyNote: { width: 320, height: 240 },
+  soraBlueprint: { width: 320, height: 360 },
+  brollBatch: { width: 380, height: 420 },
+  arrayNode: { width: 320, height: 320 },
+  listSelector: { width: 280, height: 200 },
+  imageFilter: { width: 320, height: 400 },
+  zipIterator: { width: 340, height: 380 },
+  subWorkflow: { width: 320, height: 280 },
+};
+
 const GROUP_COLORS = ["neutral", "blue", "green", "purple", "orange", "red"] as const;
 let groupColorCounter = 0;
 function nextGroupColor(): NBGroup["color"] {
@@ -505,11 +540,13 @@ function makePlaceholder(node: WeavyNode, reason: string): NBNode {
   const summary = `[Weavy ${node.type}${
     node.data.name ? ` — ${node.data.name}` : ""
   }]\n${reason}\n\nOriginal payload:\n${JSON.stringify(node.data, null, 2).slice(0, 1500)}`;
+  const size = NB_DEFAULT_DIMENSIONS.stickyNote;
   return {
     id: node.id,
     type: "stickyNote",
     position: node.position,
-    style: { width: 320, height: 240 },
+    style: size,
+    measured: size,
     data: {
       text: summary,
       color: "pink",
@@ -661,13 +698,17 @@ export function convertWeavyToNB(
 
     const converted = convertWeavyNode(wnode, report);
     if (converted) {
-      const size = getNodeSize(wnode);
+      const size =
+        getNodeSize(wnode) ??
+        NB_DEFAULT_DIMENSIONS[converted.nbType] ??
+        { width: 300, height: 280 };
       const nb: NBNode = {
         id: wnode.id,
         type: converted.nbType,
         position: wnode.position,
         data: converted.data,
-        ...(size ? { style: size, measured: size } : {}),
+        style: size,
+        measured: size,
       };
       nbNodesById.set(wnode.id, nb);
       report.convertedNodes++;
