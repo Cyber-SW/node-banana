@@ -43,18 +43,65 @@ export function WelcomeModal({
       if (!file) return;
 
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
+        const text = event.target?.result as string;
+        let parsed: unknown;
         try {
-          const workflow = JSON.parse(
-            event.target?.result as string
-          ) as WorkflowFile;
-          if (workflow.version && workflow.nodes && workflow.edges) {
-            onWorkflowGenerated(workflow);
-          } else {
-            alert("Invalid workflow file format");
-          }
+          parsed = JSON.parse(text);
         } catch {
-          alert("Failed to parse workflow file");
+          alert("Failed to parse JSON file");
+          return;
+        }
+
+        if (!parsed || typeof parsed !== "object") {
+          alert("Invalid workflow file format");
+          return;
+        }
+
+        // Sniff Weavy export — its top-level shape resembles NB's
+        // (version + nodes + edges) but uses Weavy-specific node types
+        // and parent reparenting. If we see any Weavy marker, route
+        // through the converter.
+        const obj = parsed as { workspaceId?: unknown; organizationId?: unknown; nodes?: Array<{ type?: string }> };
+        const WEAVY_NODE_TYPES = new Set([
+          "custommodelV2",
+          "promptV3",
+          "muxv2",
+          "prompt_concat",
+          "custom_group",
+          "compv3",
+          "stickynote", // Weavy uses lowercase, NB uses stickyNote
+        ]);
+        const looksLikeWeavy =
+          obj.workspaceId !== undefined ||
+          obj.organizationId !== undefined ||
+          (Array.isArray(obj.nodes) && obj.nodes.some((n) => n?.type && WEAVY_NODE_TYPES.has(n.type)));
+
+        if (looksLikeWeavy) {
+          try {
+            const res = await fetch("/api/import-weavy", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ weavy: text, filename: file.name }),
+            });
+            const result = await res.json();
+            if (!result.success) {
+              alert(result.error || "Failed to convert Weavy workflow");
+              return;
+            }
+            onWorkflowGenerated(result.workflow as WorkflowFile);
+          } catch (err) {
+            alert(err instanceof Error ? err.message : "Weavy conversion failed");
+          }
+          return;
+        }
+
+        // Native NB workflow
+        const workflow = parsed as WorkflowFile;
+        if (workflow.version && workflow.nodes && workflow.edges) {
+          onWorkflowGenerated(workflow);
+        } else {
+          alert("Invalid workflow file format");
         }
       };
       reader.readAsText(file);
