@@ -301,7 +301,11 @@ function getModelKey(node: WeavyNode): string | null {
 }
 
 function getNodeSize(node: WeavyNode): { width: number; height: number } | null {
-  if (node.data.width && node.data.height) {
+  // For custom_group nodes, data.width/height ARE the group box size.
+  // For other Weavy node types (notably `import`), data.width/height
+  // describe the image's pixel dimensions, NOT the node card — using
+  // them would make image cards balloon to image size on the canvas.
+  if (node.type === "custom_group" && node.data.width && node.data.height) {
     return { width: node.data.width, height: node.data.height };
   }
   if (node.style?.width && node.style?.height) {
