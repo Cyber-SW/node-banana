@@ -18,7 +18,6 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as dagre from "@dagrejs/dagre";
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -725,15 +724,9 @@ function bypassRouters(
 
 // ─── Top-level convert ─────────────────────────────────────────────────
 
-export interface ConvertOptions {
-  /** "dagre" (default) = auto-layout. "weavy" = keep source positions, scaled. */
-  layout?: "dagre" | "weavy";
-}
-
 export function convertWeavyToNB(
   weavy: WeavyFile,
-  inputFileLabel: string,
-  options: ConvertOptions = {}
+  inputFileLabel: string
 ): NBWorkflowFile {
   const report: ConversionReport = {
     inputFile: inputFileLabel,
@@ -892,88 +885,124 @@ export function convertWeavyToNB(
     _conversion_report: report,
   };
 
-  // Step 6: layout. Default = dagre auto-layout (clean DAG). Caller
-  // can opt out and fall back to scaled Weavy positions instead.
-  if (options.layout === "weavy") {
-    rescaleLayout(out, 0.3);
-  } else {
-    applyDagreLayout(out);
-  }
+  // Step 6: normalize layout density + push apart overlapping cards.
+  // Weavy spreads nodes ~3.5x wider than native NB, so we scale down
+  // first to match native density. That leaves some clusters of close
+  // nodes overlapping, so a repulsion pass shoves them apart while
+  // preserving the original spatial layout.
+  rescaleLayout(out, 0.3);
+  separateOverlappingNodes(out);
+  refitGroups(out);
 
   return out;
 }
 
 /**
- * Run dagre's directed-graph layout over the workflow. Edge sources
- * sit on the left, targets on the right; rows pack vertically. Group
- * membership is preserved — after layout, each group's box is
- * resized to enclose its members.
- *
- * Disconnected nodes (no edges) are kept in dagre's graph too, so
- * they get a slot in the layout rather than colliding at (0, 0).
+ * Iteratively push apart any pair of node cards whose bounding boxes
+ * overlap. Pushes along the smaller-overlap axis to minimize layout
+ * disruption. Preserves Weavy's spatial intent — clusters stay
+ * clustered, just no longer stacked on top of each other.
  */
-function applyDagreLayout(wf: NBWorkflowFile): void {
-  if (wf.nodes.length === 0) return;
+function separateOverlappingNodes(
+  wf: NBWorkflowFile,
+  iterations = 300,
+  gap = 20
+): void {
+  if (wf.nodes.length < 2) return;
+  const n = wf.nodes.length;
+  for (let it = 0; it < iterations; it++) {
+    let moved = false;
+    for (let i = 0; i < n; i++) {
+      const a = wf.nodes[i];
+      const aw = a.style?.width ?? 300;
+      const ah = a.style?.height ?? 280;
+      for (let j = i + 1; j < n; j++) {
+        const b = wf.nodes[j];
+        const bw = b.style?.width ?? 300;
+        const bh = b.style?.height ?? 280;
 
-  const g = new dagre.graphlib.Graph({ compound: false });
-  g.setGraph({
-    rankdir: "LR",
-    nodesep: 60,
-    ranksep: 120,
-    marginx: 40,
-    marginy: 40,
-  });
-  g.setDefaultEdgeLabel(() => ({}));
+        // Center-to-center vector
+        const acx = a.position.x + aw / 2;
+        const acy = a.position.y + ah / 2;
+        const bcx = b.position.x + bw / 2;
+        const bcy = b.position.y + bh / 2;
+        const dx = bcx - acx;
+        const dy = bcy - acy;
 
-  for (const n of wf.nodes) {
-    g.setNode(n.id, {
-      width: n.style?.width ?? 300,
-      height: n.style?.height ?? 280,
-    });
+        // How much they overlap on each axis (positive = overlap)
+        const overlapX = (aw + bw) / 2 + gap - Math.abs(dx);
+        const overlapY = (ah + bh) / 2 + gap - Math.abs(dy);
+        if (overlapX <= 0 || overlapY <= 0) continue;
+
+        // Push along the shallower axis — splits movement evenly.
+        if (overlapX < overlapY) {
+          const push = overlapX / 2;
+          if (dx === 0) {
+            // Coincident centers — pick a direction.
+            a.position.x -= push;
+            b.position.x += push;
+          } else if (dx < 0) {
+            a.position.x += push;
+            b.position.x -= push;
+          } else {
+            a.position.x -= push;
+            b.position.x += push;
+          }
+        } else {
+          const push = overlapY / 2;
+          if (dy === 0) {
+            a.position.y -= push;
+            b.position.y += push;
+          } else if (dy < 0) {
+            a.position.y += push;
+            b.position.y -= push;
+          } else {
+            a.position.y -= push;
+            b.position.y += push;
+          }
+        }
+        moved = true;
+      }
+    }
+    if (!moved) break;
   }
-  for (const e of wf.edges) {
-    g.setEdge(e.source, e.target);
-  }
-
-  dagre.layout(g);
-
-  // Update node positions. Dagre returns center coords; React Flow
-  // uses top-left, so subtract half the dimensions.
-  for (const n of wf.nodes) {
-    const layout = g.node(n.id);
-    if (!layout) continue;
-    n.position = {
-      x: Math.round(layout.x - (n.style?.width ?? 300) / 2),
-      y: Math.round(layout.y - (n.style?.height ?? 280) / 2),
+  // Round to whole pixels.
+  for (const node of wf.nodes) {
+    node.position = {
+      x: Math.round(node.position.x),
+      y: Math.round(node.position.y),
     };
   }
+}
 
-  // Resize groups to enclose their members with some padding.
-  if (wf.groups) {
-    const PAD = 40;
-    const HEADER = 40; // room for group label at top
-    for (const groupId of Object.keys(wf.groups)) {
-      const members = wf.nodes.filter((n) => n.groupId === groupId);
-      if (members.length === 0) {
-        // Empty group → drop it; an empty box is just visual noise.
-        delete wf.groups[groupId];
-        continue;
-      }
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const m of members) {
-        const w = m.style?.width ?? 300;
-        const h = m.style?.height ?? 280;
-        if (m.position.x < minX) minX = m.position.x;
-        if (m.position.y < minY) minY = m.position.y;
-        if (m.position.x + w > maxX) maxX = m.position.x + w;
-        if (m.position.y + h > maxY) maxY = m.position.y + h;
-      }
-      wf.groups[groupId].position = { x: minX - PAD, y: minY - PAD - HEADER };
-      wf.groups[groupId].size = {
-        width: maxX - minX + PAD * 2,
-        height: maxY - minY + PAD * 2 + HEADER,
-      };
+/**
+ * Resize group boxes to enclose their members after node positions
+ * have shifted. Drop empty groups (visual noise).
+ */
+function refitGroups(wf: NBWorkflowFile): void {
+  if (!wf.groups) return;
+  const PAD = 40;
+  const HEADER = 40;
+  for (const groupId of Object.keys(wf.groups)) {
+    const members = wf.nodes.filter((n) => n.groupId === groupId);
+    if (members.length === 0) {
+      delete wf.groups[groupId];
+      continue;
     }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const m of members) {
+      const w = m.style?.width ?? 300;
+      const h = m.style?.height ?? 280;
+      if (m.position.x < minX) minX = m.position.x;
+      if (m.position.y < minY) minY = m.position.y;
+      if (m.position.x + w > maxX) maxX = m.position.x + w;
+      if (m.position.y + h > maxY) maxY = m.position.y + h;
+    }
+    wf.groups[groupId].position = { x: minX - PAD, y: minY - PAD - HEADER };
+    wf.groups[groupId].size = {
+      width: maxX - minX + PAD * 2,
+      height: maxY - minY + PAD * 2 + HEADER,
+    };
   }
 }
 
@@ -1035,14 +1064,10 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/_+/g, "_");
 }
 
-function processFile(
-  inputPath: string,
-  outputPath: string,
-  options: ConvertOptions = {}
-): ConversionReport {
+function processFile(inputPath: string, outputPath: string): ConversionReport {
   const raw = fs.readFileSync(inputPath, "utf8");
   const weavy = JSON.parse(raw) as WeavyFile;
-  const nb = convertWeavyToNB(weavy, path.basename(inputPath), options);
+  const nb = convertWeavyToNB(weavy, path.basename(inputPath));
 
   fs.writeFileSync(outputPath, JSON.stringify(nb, null, 2));
   return nb._conversion_report!;
@@ -1068,17 +1093,9 @@ function printReport(r: ConversionReport): void {
 }
 
 function main(): void {
-  const rawArgs = process.argv.slice(2);
-  const flags: ConvertOptions = {};
-  const args: string[] = [];
-  for (const a of rawArgs) {
-    if (a === "--no-layout") flags.layout = "weavy";
-    else if (a === "--layout=dagre") flags.layout = "dagre";
-    else if (a === "--layout=weavy") flags.layout = "weavy";
-    else args.push(a);
-  }
+  const args = process.argv.slice(2);
   if (args.length === 0) {
-    console.error("Usage: npx tsx scripts/weavy-to-nodebanana.ts [--no-layout] <input.json|dir/> [output.json|dir/]");
+    console.error("Usage: npx tsx scripts/weavy-to-nodebanana.ts <input.json|dir/> [output.json|dir/]");
     process.exit(1);
   }
   const inputArg = args[0];
@@ -1092,7 +1109,7 @@ function main(): void {
     for (const f of files) {
       const inP = path.join(inputArg, f);
       const outP = path.join(outDir, sanitizeFilename(f.replace(/^weavy-/, "").replace(/\.json$/, "") + ".json"));
-      const r = processFile(inP, outP, flags);
+      const r = processFile(inP, outP);
       printReport(r);
       totalIn += r.totalWeavyNodes;
       totalConv += r.convertedNodes;
@@ -1101,7 +1118,7 @@ function main(): void {
     console.log(`\n=== Summary: ${files.length} files, ${totalConv}/${totalIn} nodes converted (${totalPh} placeholders) ===`);
   } else {
     const outputPath = outputArg ?? inputArg.replace(/\.json$/, ".nb.json");
-    const r = processFile(inputArg, outputPath, flags);
+    const r = processFile(inputArg, outputPath);
     printReport(r);
     console.log(`\nWrote: ${outputPath}`);
   }
