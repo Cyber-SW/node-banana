@@ -320,7 +320,7 @@ export function Header() {
                   <button
                     onClick={() => setShowImportDialog(true)}
                     className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] rounded transition-all duration-[120ms]"
-                    title="Import from screenshot (Weavy, ComfyUI, n8n)"
+                    title="Import workflow (Weavy JSON, screenshot, Notion)"
                   >
                     <svg
                       className="w-4 h-4"
@@ -393,7 +393,7 @@ export function Header() {
                   <button
                     onClick={() => setShowImportDialog(true)}
                     className="p-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] rounded transition-all duration-[120ms]"
-                    title="Import from screenshot (Weavy, ComfyUI, n8n)"
+                    title="Import workflow (Weavy JSON, screenshot, Notion)"
                   >
                     <svg
                       className="w-4 h-4"
