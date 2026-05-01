@@ -18,6 +18,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as dagre from "@dagrejs/dagre";
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -724,9 +725,15 @@ function bypassRouters(
 
 // ─── Top-level convert ─────────────────────────────────────────────────
 
+export interface ConvertOptions {
+  /** "dagre" (default) = auto-layout. "weavy" = keep source positions, scaled. */
+  layout?: "dagre" | "weavy";
+}
+
 export function convertWeavyToNB(
   weavy: WeavyFile,
-  inputFileLabel: string
+  inputFileLabel: string,
+  options: ConvertOptions = {}
 ): NBWorkflowFile {
   const report: ConversionReport = {
     inputFile: inputFileLabel,
@@ -885,16 +892,89 @@ export function convertWeavyToNB(
     _conversion_report: report,
   };
 
-  // Step 6: normalize layout density. Weavy spreads nodes over ~12x
-  // more canvas area per node than native NB workflows, so an imported
-  // file feels zoomed-out and the nodes look small relative to other
-  // NB content. Translate to origin and scale positions + group sizes
-  // by a constant factor to match native NB layout density. Node
-  // dimensions themselves are NOT scaled — we want individual cards to
-  // render at the same size as native nodes.
-  rescaleLayout(out, 0.3);
+  // Step 6: layout. Default = dagre auto-layout (clean DAG). Caller
+  // can opt out and fall back to scaled Weavy positions instead.
+  if (options.layout === "weavy") {
+    rescaleLayout(out, 0.3);
+  } else {
+    applyDagreLayout(out);
+  }
 
   return out;
+}
+
+/**
+ * Run dagre's directed-graph layout over the workflow. Edge sources
+ * sit on the left, targets on the right; rows pack vertically. Group
+ * membership is preserved — after layout, each group's box is
+ * resized to enclose its members.
+ *
+ * Disconnected nodes (no edges) are kept in dagre's graph too, so
+ * they get a slot in the layout rather than colliding at (0, 0).
+ */
+function applyDagreLayout(wf: NBWorkflowFile): void {
+  if (wf.nodes.length === 0) return;
+
+  const g = new dagre.graphlib.Graph({ compound: false });
+  g.setGraph({
+    rankdir: "LR",
+    nodesep: 60,
+    ranksep: 120,
+    marginx: 40,
+    marginy: 40,
+  });
+  g.setDefaultEdgeLabel(() => ({}));
+
+  for (const n of wf.nodes) {
+    g.setNode(n.id, {
+      width: n.style?.width ?? 300,
+      height: n.style?.height ?? 280,
+    });
+  }
+  for (const e of wf.edges) {
+    g.setEdge(e.source, e.target);
+  }
+
+  dagre.layout(g);
+
+  // Update node positions. Dagre returns center coords; React Flow
+  // uses top-left, so subtract half the dimensions.
+  for (const n of wf.nodes) {
+    const layout = g.node(n.id);
+    if (!layout) continue;
+    n.position = {
+      x: Math.round(layout.x - (n.style?.width ?? 300) / 2),
+      y: Math.round(layout.y - (n.style?.height ?? 280) / 2),
+    };
+  }
+
+  // Resize groups to enclose their members with some padding.
+  if (wf.groups) {
+    const PAD = 40;
+    const HEADER = 40; // room for group label at top
+    for (const groupId of Object.keys(wf.groups)) {
+      const members = wf.nodes.filter((n) => n.groupId === groupId);
+      if (members.length === 0) {
+        // Empty group → drop it; an empty box is just visual noise.
+        delete wf.groups[groupId];
+        continue;
+      }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const m of members) {
+        const w = m.style?.width ?? 300;
+        const h = m.style?.height ?? 280;
+        if (m.position.x < minX) minX = m.position.x;
+        if (m.position.y < minY) minY = m.position.y;
+        if (m.position.x + w > maxX) maxX = m.position.x + w;
+        if (m.position.y + h > maxY) maxY = m.position.y + h;
+      }
+      wf.groups[groupId].position = { x: minX - PAD, y: minY - PAD - HEADER };
+      wf.groups[groupId].size = {
+        width: maxX - minX + PAD * 2,
+        height: maxY - minY + PAD * 2 + HEADER,
+      };
+    }
+  }
 }
 
 /**
@@ -955,10 +1035,14 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/_+/g, "_");
 }
 
-function processFile(inputPath: string, outputPath: string): ConversionReport {
+function processFile(
+  inputPath: string,
+  outputPath: string,
+  options: ConvertOptions = {}
+): ConversionReport {
   const raw = fs.readFileSync(inputPath, "utf8");
   const weavy = JSON.parse(raw) as WeavyFile;
-  const nb = convertWeavyToNB(weavy, path.basename(inputPath));
+  const nb = convertWeavyToNB(weavy, path.basename(inputPath), options);
 
   fs.writeFileSync(outputPath, JSON.stringify(nb, null, 2));
   return nb._conversion_report!;
@@ -984,9 +1068,17 @@ function printReport(r: ConversionReport): void {
 }
 
 function main(): void {
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
+  const flags: ConvertOptions = {};
+  const args: string[] = [];
+  for (const a of rawArgs) {
+    if (a === "--no-layout") flags.layout = "weavy";
+    else if (a === "--layout=dagre") flags.layout = "dagre";
+    else if (a === "--layout=weavy") flags.layout = "weavy";
+    else args.push(a);
+  }
   if (args.length === 0) {
-    console.error("Usage: npx tsx scripts/weavy-to-nodebanana.ts <input.json|dir/> [output.json|dir/]");
+    console.error("Usage: npx tsx scripts/weavy-to-nodebanana.ts [--no-layout] <input.json|dir/> [output.json|dir/]");
     process.exit(1);
   }
   const inputArg = args[0];
@@ -1000,7 +1092,7 @@ function main(): void {
     for (const f of files) {
       const inP = path.join(inputArg, f);
       const outP = path.join(outDir, sanitizeFilename(f.replace(/^weavy-/, "").replace(/\.json$/, "") + ".json"));
-      const r = processFile(inP, outP);
+      const r = processFile(inP, outP, flags);
       printReport(r);
       totalIn += r.totalWeavyNodes;
       totalConv += r.convertedNodes;
@@ -1009,7 +1101,7 @@ function main(): void {
     console.log(`\n=== Summary: ${files.length} files, ${totalConv}/${totalIn} nodes converted (${totalPh} placeholders) ===`);
   } else {
     const outputPath = outputArg ?? inputArg.replace(/\.json$/, ".nb.json");
-    const r = processFile(inputArg, outputPath);
+    const r = processFile(inputArg, outputPath, flags);
     printReport(r);
     console.log(`\nWrote: ${outputPath}`);
   }

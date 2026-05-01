@@ -37,6 +37,7 @@
     "zustand": "^5.0.9"
   },
   "devDependencies": {
+    "@dagrejs/dagre": "^3.0.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.1",
     "@types/jszip": "^3.4.0",
