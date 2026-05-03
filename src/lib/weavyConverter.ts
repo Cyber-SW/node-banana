@@ -205,7 +205,7 @@ const MODEL_MAP: Record<string, ModelMapping> = {
 // ─── Helpers ───────────────────────────────────────────────────────────
 
 const NB_DEFAULT_DIMENSIONS: Record<string, { width: number; height: number }> = {
-  imageInput: { width: 320, height: 380 },
+  imageInput: { width: 480, height: 560 },
   audioInput: { width: 300, height: 200 },
   annotation: { width: 300, height: 280 },
   prompt: { width: 320, height: 220 },
@@ -332,10 +332,10 @@ function extractWeavyOutputText(node: WeavyNode): string | null {
 }
 
 /**
- * Pick an imageInput card size from the source file's aspect ratio,
- * so portrait/landscape images get visually-weighted cards similar
- * to how Weavy renders them. Three simple buckets keeps the layout
- * consistent without producing extreme card shapes.
+ * Pick an imageInput card size from the source file's aspect ratio.
+ * Sizes are scaled to roughly match Weavy's render footprint so the
+ * 1:1 position transfer doesn't leave visual sparseness around image
+ * cards.
  */
 function getImageInputSizeFromFile(
   file: { width?: number; height?: number; type?: string } | undefined
@@ -345,9 +345,9 @@ function getImageInputSizeFromFile(
     return fallback;
   }
   const ratio = file.width / file.height;
-  if (ratio > 1.35) return { width: 420, height: 320 }; // landscape
-  if (ratio < 0.75) return { width: 300, height: 420 }; // portrait
-  return { width: 360, height: 380 };                    // ~square
+  if (ratio > 1.35) return { width: 600, height: 460 }; // landscape
+  if (ratio < 0.75) return { width: 440, height: 620 }; // portrait
+  return { width: 520, height: 560 };                    // ~square
 }
 
 // ─── Node converters ───────────────────────────────────────────────────
