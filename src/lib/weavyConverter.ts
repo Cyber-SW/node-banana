@@ -268,6 +268,69 @@ function getNodeSize(node: WeavyNode): { width: number; height: number } | null 
   return null;
 }
 
+interface WeavyResultMedia {
+  url: string;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * Extract the most recent rendered output of a given media kind from
+ * a Weavy custommodelV2 node. Weavy stores past run results in
+ * `data.result` (an array, latest items typically last) and sometimes
+ * mirrors them in `data.files`.
+ */
+function extractWeavyOutput(
+  node: WeavyNode,
+  kind: "image" | "video"
+): WeavyResultMedia | null {
+  const result = (node.data as { result?: unknown }).result;
+  if (Array.isArray(result)) {
+    for (let i = result.length - 1; i >= 0; i--) {
+      const item = result[i];
+      if (
+        item &&
+        typeof item === "object" &&
+        (item as { type?: string }).type === kind &&
+        typeof (item as { url?: string }).url === "string"
+      ) {
+        return item as WeavyResultMedia;
+      }
+    }
+  }
+  const files = node.data.files ?? [];
+  for (let i = files.length - 1; i >= 0; i--) {
+    const fi = files[i];
+    if (fi?.type === kind && fi.url) {
+      return fi as WeavyResultMedia;
+    }
+  }
+  return null;
+}
+
+function extractWeavyOutputText(node: WeavyNode): string | null {
+  const result = (node.data as { result?: unknown }).result;
+  if (Array.isArray(result)) {
+    for (let i = result.length - 1; i >= 0; i--) {
+      const item = result[i];
+      if (
+        item &&
+        typeof item === "object" &&
+        (item as { type?: string }).type === "text"
+      ) {
+        const text =
+          (item as { text?: string; output?: string; value?: string }).text ??
+          (item as { output?: string }).output ??
+          (item as { value?: string }).value;
+        if (typeof text === "string" && text.length > 0) return text;
+      }
+    }
+  }
+  const out = (node.data as { output?: { text?: string } }).output;
+  if (out && typeof out.text === "string") return out.text;
+  return null;
+}
+
 /**
  * Pick an imageInput card size from the source file's aspect ratio,
  * so portrait/landscape images get visually-weighted cards similar
@@ -454,14 +517,15 @@ function convertWeavyNode(
       const params = (node.data.params ?? {}) as Record<string, unknown>;
 
       switch (mapping.nbType) {
-        case "nanoBanana":
+        case "nanoBanana": {
+          const renderedImage = extractWeavyOutput(node, "image");
           return {
             nbType: "nanoBanana",
             data: {
               inputImages: [],
               inputPrompt: (params.prompt as string) ?? null,
               systemPrompt: null,
-              outputImage: null,
+              outputImage: renderedImage?.url ?? null,
               aspectRatio: (params.aspect_ratio as string) ?? "auto",
               resolution: (params.resolution as string) ?? "1K",
               model: mapping.modelId,
@@ -472,50 +536,55 @@ function convertWeavyNode(
               },
               useGoogleSearch: false,
               parameters: { ...params },
-              status: "idle",
+              status: renderedImage ? "success" : "idle",
               error: null,
               imageHistory: [],
               selectedHistoryIndex: 0,
               imageInputHandles: 2,
             },
           };
-        case "llmGenerate":
+        }
+        case "llmGenerate": {
+          const renderedText = extractWeavyOutputText(node);
           return {
             nbType: "llmGenerate",
             data: {
               inputPrompt: (params.prompt as string) ?? null,
               systemPrompt: (params.system_prompt as string) ?? null,
               inputImages: [],
-              outputText: null,
+              outputText: renderedText,
               outputHistory: [],
               selectedHistoryIndex: -1,
               provider: mapping.provider === "openai" ? "openai" : "google",
               model: (params.model as string) ?? mapping.modelId,
               temperature: (params.temperature as number) ?? 0.7,
               maxTokens: 2048,
-              status: "idle",
+              status: renderedText ? "success" : "idle",
               error: null,
             },
           };
-        case "generateVideo":
+        }
+        case "generateVideo": {
+          const renderedVideo = extractWeavyOutput(node, "video");
           return {
             nbType: "generateVideo",
             data: {
               inputImages: [],
               inputPrompt: (params.prompt as string) ?? null,
-              outputVideo: null,
+              outputVideo: renderedVideo?.url ?? null,
               selectedModel: {
                 provider: mapping.provider,
                 modelId: mapping.modelId,
                 displayName: mapping.displayName,
               },
               parameters: { ...params },
-              status: "idle",
+              status: renderedVideo ? "success" : "idle",
               error: null,
               videoHistory: [],
               selectedVideoHistoryIndex: -1,
             },
           };
+        }
         case "generate3d":
           return {
             nbType: "generate3d",
@@ -722,10 +791,17 @@ export function convertWeavyToNB(
     const converted = convertWeavyNode(wnode, report, inCount);
     const absPos = resolveAbsolutePosition(wnode, weavyById);
     if (converted) {
-      const aspectSize =
-        wnode.type === "import" && converted.nbType === "imageInput"
-          ? getImageInputSizeFromFile(wnode.data.files?.[0])
-          : null;
+      let aspectSize: { width: number; height: number } | null = null;
+      if (wnode.type === "import" && converted.nbType === "imageInput") {
+        aspectSize = getImageInputSizeFromFile(wnode.data.files?.[0]);
+      } else if (
+        wnode.type === "custommodelV2" &&
+        (converted.nbType === "nanoBanana" || converted.nbType === "generateVideo")
+      ) {
+        const kind = converted.nbType === "generateVideo" ? "video" : "image";
+        const media = extractWeavyOutput(wnode, kind);
+        if (media) aspectSize = getImageInputSizeFromFile({ ...media, type: "image" });
+      }
       const size =
         aspectSize ??
         getNodeSize(wnode) ??
