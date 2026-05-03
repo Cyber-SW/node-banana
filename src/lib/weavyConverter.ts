@@ -205,7 +205,7 @@ const MODEL_MAP: Record<string, ModelMapping> = {
 // ─── Helpers ───────────────────────────────────────────────────────────
 
 const NB_DEFAULT_DIMENSIONS: Record<string, { width: number; height: number }> = {
-  imageInput: { width: 300, height: 280 },
+  imageInput: { width: 320, height: 380 },
   audioInput: { width: 300, height: 200 },
   annotation: { width: 300, height: 280 },
   prompt: { width: 320, height: 220 },
@@ -266,6 +266,25 @@ function getNodeSize(node: WeavyNode): { width: number; height: number } | null 
     return { width: node.measured.width, height: node.measured.height };
   }
   return null;
+}
+
+/**
+ * Pick an imageInput card size from the source file's aspect ratio,
+ * so portrait/landscape images get visually-weighted cards similar
+ * to how Weavy renders them. Three simple buckets keeps the layout
+ * consistent without producing extreme card shapes.
+ */
+function getImageInputSizeFromFile(
+  file: { width?: number; height?: number; type?: string } | undefined
+): { width: number; height: number } {
+  const fallback = NB_DEFAULT_DIMENSIONS.imageInput;
+  if (!file || file.type !== "image" || !file.width || !file.height) {
+    return fallback;
+  }
+  const ratio = file.width / file.height;
+  if (ratio > 1.35) return { width: 420, height: 320 }; // landscape
+  if (ratio < 0.75) return { width: 300, height: 420 }; // portrait
+  return { width: 360, height: 380 };                    // ~square
 }
 
 // ─── Node converters ───────────────────────────────────────────────────
@@ -338,6 +357,25 @@ function convertWeavyNode(
       return {
         nbType: "output",
         data: { image: null, video: null, contentType: "image" },
+      };
+    }
+
+    case "seed": {
+      const seed = (node.data as { seed?: number; isRandom?: boolean }).seed;
+      const isRandom = (node.data as { isRandom?: boolean }).isRandom;
+      const text = isRandom ? "random" : String(seed ?? 0);
+      return {
+        nbType: "prompt",
+        data: { prompt: text, prompts: [text], activePromptIndex: 0 },
+      };
+    }
+
+    case "boolean": {
+      const value = (node.data as { value?: boolean }).value;
+      const text = value ? "true" : "false";
+      return {
+        nbType: "prompt",
+        data: { prompt: text, prompts: [text], activePromptIndex: 0 },
       };
     }
 
@@ -496,7 +534,6 @@ function convertWeavyNode(
             },
           };
       }
-      return null;
     }
 
     default:
@@ -685,7 +722,12 @@ export function convertWeavyToNB(
     const converted = convertWeavyNode(wnode, report, inCount);
     const absPos = resolveAbsolutePosition(wnode, weavyById);
     if (converted) {
+      const aspectSize =
+        wnode.type === "import" && converted.nbType === "imageInput"
+          ? getImageInputSizeFromFile(wnode.data.files?.[0])
+          : null;
       const size =
+        aspectSize ??
         getNodeSize(wnode) ??
         NB_DEFAULT_DIMENSIONS[converted.nbType] ??
         { width: 300, height: 280 };
