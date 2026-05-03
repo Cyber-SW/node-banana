@@ -3,8 +3,8 @@ services:
     build: .
     container_name: node-banana
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     env_file:
       - .env
     volumes:
