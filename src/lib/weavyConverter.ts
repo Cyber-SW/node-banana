@@ -910,67 +910,13 @@ export function convertWeavyToNB(
     _conversion_report: report,
   };
 
-  // Weavy renders its canvas at a tighter visual density than NB.
-  // Scaling positions ~0.55 reproduces Weavy's spacing feel without
-  // collapsing clusters; the gentle pairwise nudge below only pushes
-  // node cards that genuinely overlap (no cascade).
-  rescaleLayout(out, 0.55);
-  nudgeOverlappingNodes(out);
+  // Use Weavy's hand-laid positions exactly. Only shift the origin to
+  // (0,0); no scaling or anti-overlap so the resulting NB layout
+  // matches what the user sees in Weavy 1:1.
+  rescaleLayout(out, 1.0);
   refitGroups(out);
 
   return out;
-}
-
-/**
- * Resolve overlapping cards with a few light iterations. Each pass
- * only moves pairs that currently overlap, pushing along the
- * smaller-overlap axis by half the overlap. Few iterations + small
- * gap keep cluster shapes intact while clearing most overlaps.
- */
-function nudgeOverlappingNodes(
-  wf: NBWorkflowFile,
-  iterations = 10,
-  gap = 4
-): void {
-  if (wf.nodes.length < 2) return;
-  const n = wf.nodes.length;
-  for (let it = 0; it < iterations; it++) {
-    let any = false;
-    for (let i = 0; i < n; i++) {
-      const a = wf.nodes[i];
-      const aw = a.style?.width ?? 300;
-      const ah = a.style?.height ?? 280;
-      for (let j = i + 1; j < n; j++) {
-        const b = wf.nodes[j];
-        const bw = b.style?.width ?? 300;
-        const bh = b.style?.height ?? 280;
-        const dx = (b.position.x + bw / 2) - (a.position.x + aw / 2);
-        const dy = (b.position.y + bh / 2) - (a.position.y + ah / 2);
-        const overlapX = (aw + bw) / 2 + gap - Math.abs(dx);
-        const overlapY = (ah + bh) / 2 + gap - Math.abs(dy);
-        if (overlapX <= 0 || overlapY <= 0) continue;
-        if (overlapX < overlapY) {
-          const push = overlapX / 2;
-          const sgn = dx >= 0 ? 1 : -1;
-          a.position.x -= sgn * push;
-          b.position.x += sgn * push;
-        } else {
-          const push = overlapY / 2;
-          const sgn = dy >= 0 ? 1 : -1;
-          a.position.y -= sgn * push;
-          b.position.y += sgn * push;
-        }
-        any = true;
-      }
-    }
-    if (!any) break;
-  }
-  for (const node of wf.nodes) {
-    node.position = {
-      x: Math.round(node.position.x),
-      y: Math.round(node.position.y),
-    };
-  }
 }
 
 function refitGroups(wf: NBWorkflowFile): void {
