@@ -213,7 +213,7 @@ All routes in `src/app/api/`:
 ## Production Deployment
 
 - Server: Hetzner `46.224.96.47`, app dir `/opt/migrated/node-banana`, deployed via `deploy.sh` (Docker Compose + Traefik on the shared `coolify` network).
-- **Host port: 3001** (mapped to container port 3000). Port 3000 on the host is owned by Teable — do NOT change node-banana's host mapping back to 3000.
+- **Host port: 3003** (mapped to container port 3000). Ports 3000 (Teable), 3001, 3002, 3010 are all in use on this host — do NOT change node-banana's host mapping to one of those.
 - Traefik routes `nodes.aditor.ai` to the container via the `coolify` docker network using the `loadbalancer.server.port=3000` label, so the host port is only for direct/debug access.
 
 ## Git Workflow
