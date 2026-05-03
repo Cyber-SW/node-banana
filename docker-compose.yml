@@ -4,7 +4,7 @@ services:
     container_name: node-banana
     restart: unless-stopped
     ports:
-      - "3003:3000"
+      - "3020:3000"
     env_file:
       - .env
     volumes:

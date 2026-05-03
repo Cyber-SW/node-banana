@@ -212,9 +212,10 @@ All routes in `src/app/api/`:
 
 ## Production Deployment
 
-- Server: Hetzner `46.224.96.47`, app dir `/opt/migrated/node-banana`, deployed via `deploy.sh` (Docker Compose + Traefik on the shared `coolify` network).
-- **Host port: 3003** (mapped to container port 3000). Ports 3000 (Teable), 3001, 3002, 3010 are all in use on this host — do NOT change node-banana's host mapping to one of those.
-- Traefik routes `nodes.aditor.ai` to the container via the `coolify` docker network using the `loadbalancer.server.port=3000` label, so the host port is only for direct/debug access.
+- Server: Hetzner `46.224.96.47`, app dir `/opt/migrated/node-banana`, deployed via `deploy.sh` (Docker Compose).
+- **Public TLS termination is done by the host's nginx, not Traefik.** `/etc/nginx/sites-enabled/nodes.aditor.ai` proxies `nodes.aditor.ai` → `127.0.0.1:3020`. So node-banana MUST publish its host port as **3020** in `docker-compose.yml` (`"3020:3000"`).
+- Do NOT change the host port to 3000 (Teable owns it), or to anything else without updating `/etc/nginx/sites-enabled/nodes.aditor.ai` and reloading nginx.
+- The Traefik labels on the container (`coolify` network, `loadbalancer.server.port=3000`) are leftover from a Coolify-managed setup and are no longer load-bearing for public access — host nginx handles that.
 
 ## Git Workflow
 
