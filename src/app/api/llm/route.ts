@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 import { LLMGenerateRequest, LLMGenerateResponse, LLMModelType } from "@/types";
 import { logger } from "@/utils/logger";
+import { imageInputsToInline } from "@/lib/imageUrlToInline";
 
 export const maxDuration = 60; // 1 minute timeout
 
@@ -66,26 +67,9 @@ async function generateWithGoogle(
   // Build multimodal content if images are provided
   let contents: string | Array<{ inlineData: { mimeType: string; data: string } } | { text: string }>;
   if (images && images.length > 0) {
+    const inlineImages = await imageInputsToInline(images);
     contents = [
-      ...images.map((img) => {
-        // Extract base64 data and mime type from data URL
-        const matches = img.match(/^data:(.+?);base64,(.+)$/);
-        if (matches) {
-          return {
-            inlineData: {
-              mimeType: matches[1],
-              data: matches[2],
-            },
-          };
-        }
-        // Fallback: assume PNG if no data URL prefix
-        return {
-          inlineData: {
-            mimeType: "image/png",
-            data: img,
-          },
-        };
-      }),
+      ...inlineImages.map(({ data, mimeType }) => ({ inlineData: { mimeType, data } })),
       { text: prompt },
     ];
   } else {
@@ -235,18 +219,16 @@ async function generateWithAnthropic(
   const content: Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }> = [];
 
   if (images && images.length > 0) {
-    for (const img of images) {
-      const matches = img.match(/^data:(.+?);base64,(.+)$/);
-      if (matches) {
-        content.push({
-          type: "image",
-          source: {
-            type: "base64",
-            media_type: matches[1],
-            data: matches[2],
-          },
-        });
-      }
+    const inlineImages = await imageInputsToInline(images);
+    for (const { data, mimeType } of inlineImages) {
+      content.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: mimeType,
+          data,
+        },
+      });
     }
   }
 

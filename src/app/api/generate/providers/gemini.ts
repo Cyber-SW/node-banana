@@ -7,6 +7,7 @@
 import { NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 import { GenerateResponse, ModelType } from "@/types";
+import { imageInputsToInline } from "@/lib/imageUrlToInline";
 
 /**
  * Map model types to Gemini API model IDs.
@@ -52,18 +53,11 @@ export async function generateWithGemini(
 ): Promise<NextResponse<GenerateResponse>> {
   console.log(`[API:${requestId}] Gemini generation - Model: ${model}, Images: ${images?.length || 0}, Prompt: ${prompt?.length || 0} chars`);
 
-  // Extract base64 data and MIME types from data URLs
-  const imageData = (images || []).map((image, idx) => {
-    if (image.includes("base64,")) {
-      const [header, data] = image.split("base64,");
-      // Extract MIME type from header (e.g., "data:image/png;" -> "image/png")
-      const mimeMatch = header.match(/data:([^;]+)/);
-      const mimeType = mimeMatch ? mimeMatch[1] : "image/png";
-      console.log(`[API:${requestId}]   Image ${idx + 1}: ${mimeType}, ${(data.length / 1024).toFixed(1)}KB`);
-      return { data, mimeType };
-    }
-    console.log(`[API:${requestId}]   Image ${idx + 1}: raw, ${(image.length / 1024).toFixed(1)}KB`);
-    return { data: image, mimeType: "image/png" };
+  // Normalize inputs to inline base64. Handles data URLs, raw base64, and
+  // http(s) URLs (e.g. Weavy CDN URLs left in imported workflows).
+  const imageData = await imageInputsToInline(images || []);
+  imageData.forEach(({ data, mimeType }, idx) => {
+    console.log(`[API:${requestId}]   Image ${idx + 1}: ${mimeType}, ${(data.length / 1024).toFixed(1)}KB`);
   });
 
   // Initialize Gemini client
