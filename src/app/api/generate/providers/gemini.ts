@@ -171,11 +171,19 @@ export async function generateWithGemini(
     responseModalities: ["IMAGE", "TEXT"],
   };
 
-  // Add imageConfig for both models (both support aspect ratio)
-  if (aspectRatio) {
+  // Add imageConfig for both models (both support aspect ratio).
+  // Gemini only accepts a fixed set of ratios; values like "auto" (from
+  // Weavy imports) must be dropped so Gemini can pick its default.
+  const GEMINI_ASPECT_RATIOS = new Set([
+    "1:1", "1:4", "1:8", "2:1", "3:2", "3:4", "4:1", "4:3",
+    "4:5", "8:1", "9:16", "16:9", "21:9",
+  ]);
+  if (aspectRatio && GEMINI_ASPECT_RATIOS.has(aspectRatio)) {
     config.imageConfig = {
       aspectRatio,
     };
+  } else if (aspectRatio) {
+    console.log(`[API:${requestId}] Ignoring unsupported aspectRatio "${aspectRatio}"; letting Gemini default`);
   }
 
   // Add resolution for Pro and Nano Banana 2
